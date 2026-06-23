@@ -1,6 +1,53 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+contract MockERC20 {
+    string public name;
+    string public symbol;
+    uint8 public constant decimals = 18;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    constructor(string memory _name, string memory _symbol) {
+        name = _name;
+        symbol = _symbol;
+    }
+
+    function transfer(address to, uint256 value) public returns (bool) {
+        require(balanceOf[msg.sender] >= value, "Insufficient balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+
+    function approve(address spender, uint256 value) public returns (bool) {
+        allowance[msg.sender][spender] = value;
+        emit Approval(msg.sender, spender, value);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public returns (bool) {
+        require(balanceOf[from] >= value, "Insufficient balance");
+        require(allowance[from][msg.sender] >= value, "Insufficient allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+        emit Transfer(from, to, value);
+        return true;
+    }
+
+    function mint(address to, uint256 amount) public {
+        totalSupply += amount;
+        balanceOf[to] += amount;
+        emit Transfer(address(0), to, amount);
+    }
+}
+
 contract Voting {
     enum VoteMode { ONE_PERSON_ONE_VOTE, TOKEN_WEIGHTED }
     enum CandidateStatus { PENDING, APPROVED, REJECTED }
@@ -35,7 +82,7 @@ contract Voting {
     mapping(address => bool) public admins;
     mapping(address => bool) public reviewers;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
-    mapping(uint256 => mapping(address => uint256)) public voterWeights;
+    MockERC20 public votingToken;
 
     event ElectionCreated(uint256 electionId, string title);
     event ElectionStarted(uint256 electionId);
@@ -68,6 +115,7 @@ contract Voting {
     constructor() {
         owner = msg.sender;
         admins[msg.sender] = true;
+        votingToken = new MockERC20("Voting Governance Token", "VGT");
     }
 
     function addAdmin(address _admin) public onlyOwner {
@@ -208,7 +256,7 @@ contract Voting {
 
         uint256 weight = 1;
         if (election.voteMode == VoteMode.TOKEN_WEIGHTED) {
-            weight = voterWeights[_electionId][msg.sender];
+            weight = votingToken.balanceOf(msg.sender);
             require(weight > 0, "No voting weight");
         }
 
@@ -217,14 +265,6 @@ contract Voting {
         election.totalVotes += weight;
 
         emit Voted(_electionId, msg.sender, _candidateId, weight);
-    }
-
-    function setVoterWeight(uint256 _electionId, address _voter, uint256 _weight) public onlyAdmin {
-        Election storage election = elections[_electionId];
-        require(election.id != 0, "Election not found");
-        require(election.voteMode == VoteMode.TOKEN_WEIGHTED, "Not token weighted mode");
-
-        voterWeights[_electionId][_voter] = _weight;
     }
 
     function getElectionInfo(uint256 _electionId) public view returns (Election memory) {

@@ -75,6 +75,10 @@
             <div>
                 <span id="walletStatus" class="wallet-status">🔒 未连接钱包</span>
                 <button id="connectBtn" class="btn">连接钱包</button>
+                <span id="tokenBalanceSection" style="display:none; margin-left:15px; font-size:14px;">
+                    💎 余额: <span id="tokenBalance" style="font-weight:bold; color:#764ba2;">0.00</span> <span id="tokenSymbol">VGT</span>
+                    <button id="faucetBtn" class="btn btn-warning" style="padding:4px 10px; font-size:12px; margin-left:8px;" onclick="mintMockToken()">领取代币 (Faucet)</button>
+                </span>
             </div>
             <span id="accountDisplay" class="account-display"></span>
         </div>
@@ -85,6 +89,18 @@
         </div>
 
         <div class="main-content">
+            <div id="protocolWarning" class="msg error" style="display:none; margin: 0 0 20px 0; font-weight: 500; line-height: 1.5;">
+                ⚠️ <strong>运行方式错误：</strong>检测到您是通过本地文件 (file://) 协议打开此页面的。
+                区块链钱包（如 MetaMask）在本地文件协议下会被浏览器限制而无法正常工作。<br>
+                请<strong>不要</strong>直接双击 <code>index.html</code>。请保持 <code>run_frontend.bat</code> 脚本窗口打开，并在浏览器中访问：
+                <a href="http://localhost:8080" target="_blank" style="color: #721c24; font-weight: bold; text-decoration: underline;">http://localhost:8080</a>
+            </div>
+
+            <div id="ethersWarning" class="msg error" style="display:none; margin: 0 0 20px 0; font-weight: 500; line-height: 1.5;">
+                ⚠️ <strong>加载失败：</strong>未能成功加载 <code>ethers.js</code> 库（由于网络原因导致 CDN 加载失败）。
+                请检查您的网络连接是否正常，或尝试刷新页面。
+            </div>
+
             <div class="tabs">
                 <div class="tab active" onclick="switchTab('elections')">投票活动列表</div>
                 <div class="tab" onclick="switchTab('create')">创建投票活动</div>
@@ -129,16 +145,16 @@
                     <div class="card-title">👤 管理员管理</div>
                     <div class="flex">
                         <input type="text" id="adminAddress" placeholder="管理员地址" style="width:250px;">
-                        <button id="addAdminBtn" class="btn">添加管理员</button>
-                        <button id="removeAdminBtn" class="btn btn-danger">移除管理员</button>
+                        <button id="addAdminBtn" class="btn" disabled>添加管理员</button>
+                        <button id="removeAdminBtn" class="btn btn-danger" disabled>移除管理员</button>
                     </div>
                 </div>
                 <div class="card">
                     <div class="card-title">👥 审核员管理</div>
                     <div class="flex">
                         <input type="text" id="reviewerAddress" placeholder="审核员地址" style="width:250px;">
-                        <button id="addReviewerBtn" class="btn">添加审核员</button>
-                        <button id="removeReviewerBtn" class="btn btn-danger">移除审核员</button>
+                        <button id="addReviewerBtn" class="btn" disabled>添加审核员</button>
+                        <button id="removeReviewerBtn" class="btn btn-danger" disabled>移除审核员</button>
                     </div>
                 </div>
             </div>
@@ -157,7 +173,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.0/dist/ethers.umd.min.js"></script>
     <script>
-        const CONTRACT_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512";
+        const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
         
         const ABI = [
             "function owner() view returns (address)",
@@ -180,11 +196,22 @@
             "function getCandidates(uint256) view returns (tuple(uint256,string,string,address,uint8,uint256)[])",
             "function getApprovedCandidates(uint256) view returns (tuple(uint256,string,string,address,uint8,uint256)[])",
             "function getAllElections() view returns (tuple(uint256,string,string,uint256,uint256,uint256,uint8,uint8,uint256,bool)[])",
-            "function hasVoted(uint256, address) view returns (bool)"
+            "function hasVoted(uint256, address) view returns (bool)",
+            "function votingToken() view returns (address)",
+            "event Voted(uint256 electionId, address voter, uint256 candidateId, uint256 weight)"
         ];
 
-        let signer, contract, userAddress;
-        let isAdmin = false, isReviewer = false;
+        const ERC20_ABI = [
+            "function symbol() view returns (string)",
+            "function decimals() view returns (uint8)",
+            "function balanceOf(address) view returns (uint256)",
+            "function mint(address, uint256) returns (bool)"
+        ];
+
+        let signer, contract, userAddress, tokenContract;
+        let tokenSymbol = "VGT";
+        let tokenDecimals = 18;
+        let isAdmin = false, isReviewer = false, isOwner = false;
 
         function showMsg(text, type = 'success') {
             const msgBox = document.getElementById('msgBox');
@@ -194,30 +221,78 @@
 
         function formatTime(timestamp) {
             if (!timestamp || timestamp == 0) return '—';
-            return new Date(timestamp * 1000).toLocaleString('zh-CN');
+            return new Date(Number(timestamp) * 1000).toLocaleString('zh-CN');
         }
 
         function getStatusText(status) {
             const statusMap = { 0: '已创建', 1: '进行中', 2: '已暂停', 3: '已结束' };
-            return statusMap[status] || '未知';
+            return statusMap[Number(status)] || '未知';
         }
 
         function getStatusBadge(status) {
             const badgeMap = { 0: 'pending', 1: 'running', 2: 'paused', 3: 'ended' };
-            return badgeMap[status] || 'pending';
+            return badgeMap[Number(status)] || 'pending';
         }
 
         function getCandidateStatusText(status) {
             const statusMap = { 0: '待审核', 1: '已通过', 2: '已驳回' };
-            return statusMap[status] || '未知';
+            return statusMap[Number(status)] || '未知';
         }
 
         function getCandidateStatusBadge(status) {
             const badgeMap = { 0: 'pending', 1: 'approved', 2: 'rejected' };
-            return badgeMap[status] || 'pending';
+            return badgeMap[Number(status)] || 'pending';
+        }
+
+        function getEffectiveStatus(status, endTime) {
+            const now = Math.floor(Date.now() / 1000);
+            const statusNum = Number(status);
+            const endTimeNum = Number(endTime);
+            if ((statusNum == 1 || statusNum == 2) && now > endTimeNum) {
+                return 3; // ENDED
+            }
+            return statusNum;
+        }
+
+        async function updateTokenBalance() {
+            if (!tokenContract || !userAddress) return;
+            try {
+                const balance = await tokenContract.balanceOf(userAddress);
+                tokenSymbol = await tokenContract.symbol();
+                tokenDecimals = await tokenContract.decimals();
+                document.getElementById('tokenBalance').innerText = ethers.formatUnits(balance, tokenDecimals);
+                document.getElementById('tokenSymbol').innerText = tokenSymbol;
+                document.getElementById('tokenBalanceSection').style.display = 'inline-block';
+            } catch (e) {
+                console.error("更新代币余额失败:", e);
+            }
+        }
+
+        async function mintMockToken() {
+            if (!tokenContract || !userAddress) return;
+            const faucetBtn = document.getElementById('faucetBtn');
+            faucetBtn.disabled = true;
+            faucetBtn.innerText = '领取中...';
+            try {
+                const amount = ethers.parseUnits("100", tokenDecimals);
+                const tx = await tokenContract.mint(userAddress, amount);
+                showMsg('⏳ 交易已提交，等待区块确认...');
+                await tx.wait();
+                showMsg(`✅ 成功领取 100 ${tokenSymbol} 测试代币！`);
+                await updateTokenBalance();
+            } catch (e) {
+                showMsg('❌ 领取代币失败: ' + (e.reason || e.message), 'error');
+            } finally {
+                faucetBtn.disabled = false;
+                faucetBtn.innerText = '领取代币 (Faucet)';
+            }
         }
 
         async function connectWallet() {
+            if (typeof ethers === 'undefined') {
+                alert('错误：ethers.js 库未加载成功，请检查网络或刷新页面！');
+                return;
+            }
             if (!window.ethereum) return alert('请安装 MetaMask!');
             try {
                 const provider = new ethers.BrowserProvider(window.ethereum);
@@ -236,13 +311,29 @@
                 }
 
                 const owner = await contract.owner();
+                isOwner = userAddress.toLowerCase() === owner.toLowerCase();
                 isAdmin = await contract.admins(userAddress);
                 isReviewer = await contract.reviewers(userAddress);
 
-                if (isAdmin || userAddress.toLowerCase() === owner.toLowerCase()) {
+                if (isAdmin || isOwner) {
                     document.getElementById('walletStatus').innerHTML += '<span class="badge permission-badge active">管理员</span>';
                 } else if (isReviewer) {
                     document.getElementById('walletStatus').innerHTML += '<span class="badge permission-badge approved">审核员</span>';
+                }
+
+                // 根据权限启用/禁用页面操作按钮
+                document.getElementById('addAdminBtn').disabled = !isOwner;
+                document.getElementById('removeAdminBtn').disabled = !isOwner;
+                document.getElementById('addReviewerBtn').disabled = !(isAdmin || isOwner);
+                document.getElementById('removeReviewerBtn').disabled = !(isAdmin || isOwner);
+
+                // Connect to token contract
+                try {
+                    const tokenAddress = await contract.votingToken();
+                    tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+                    await updateTokenBalance();
+                } catch (tokenErr) {
+                    console.error("加载代币合约失败:", tokenErr);
                 }
 
                 await loadElections();
@@ -265,10 +356,14 @@
                 let html = '';
                 for (const e of elections) {
                     const [id, title, desc, startTime, endTime, maxCandidates, voteMode, status, totalVotes, resultLocked] = e;
-                    const statusText = getStatusText(status);
-                    const badgeClass = getStatusBadge(status);
+                    const effStatus = getEffectiveStatus(status, endTime);
+                    const statusText = getStatusText(effStatus);
+                    const badgeClass = getStatusBadge(effStatus);
                     const voteModeText = voteMode == 0 ? '1人1票' : '代币权重';
                     
+                    const formattedTotalVotes = voteMode == 0 ? totalVotes.toString() : parseFloat(ethers.formatEther(totalVotes)).toFixed(2);
+                    const voteUnit = voteMode == 0 ? '票' : ` ${tokenSymbol}`;
+
                     html += `
                         <div class="election-item" onclick="showElectionDetail(${id})">
                             <div class="flex-between">
@@ -279,7 +374,7 @@
                                 <button class="btn btn-secondary">查看详情</button>
                             </div>
                             <div class="election-meta">
-                                📅 ${formatTime(startTime)} ~ ${formatTime(endTime)} | 👥 最多${maxCandidates}位候选人 | 🗳️ ${voteModeText} | 总票数: ${totalVotes}
+                                📅 ${formatTime(startTime)} ~ ${formatTime(endTime)} | 👥 最多${maxCandidates}位候选人 | 🗳️ ${voteModeText} | 总票数: ${formattedTotalVotes}${voteUnit}
                             </div>
                         </div>
                     `;
@@ -297,32 +392,42 @@
                 const candidates = await contract.getCandidates(electionId);
                 const [id, title, desc, startTime, endTime, maxCandidates, voteMode, status, totalVotes, resultLocked] = info;
                 
-                const statusText = getStatusText(status);
+                const effStatus = getEffectiveStatus(status, endTime);
+                const statusText = getStatusText(effStatus);
                 const voteModeText = voteMode == 0 ? '1人1票' : '代币权重';
                 const hasVoted = await contract.hasVoted(electionId, userAddress);
                 
+                const formattedTotalVotes = voteMode == 0 ? totalVotes.toString() : parseFloat(ethers.formatEther(totalVotes)).toFixed(2);
+                const voteUnit = voteMode == 0 ? '票' : ` ${tokenSymbol}`;
+
                 let html = `
                     <p><strong>描述：</strong>${desc}</p>
                     <p><strong>时间：</strong>${formatTime(startTime)} ~ ${formatTime(endTime)}</p>
                     <p><strong>候选人上限：</strong>${maxCandidates}</p>
                     <p><strong>投票模式：</strong>${voteModeText}</p>
-                    <p><strong>总票数：</strong>${totalVotes}</p>
+                    <p><strong>总票数：</strong>${formattedTotalVotes}${voteUnit}</p>
                     <p><strong>结果锁定：</strong>${resultLocked ? '是' : '否'}</p>
-                    <hr>
                 `;
+
+                if (voteMode == 1 && userAddress) {
+                    const userWeight = document.getElementById('tokenBalance').innerText || '0.00';
+                    html += `<p><strong>您的当前投票权重：</strong><span style="color:#667eea;font-weight:bold;">${userWeight} ${tokenSymbol}</span></p>`;
+                }
+
+                html += `<hr>`;
 
                 if (isAdmin) {
                     html += `<div class="flex" style="margin-bottom:15px;">`;
                     if (status == 0) html += `<button class="btn btn-success" onclick="handleAdminAction(${electionId}, 'start')">开始投票</button>`;
-                    if (status == 1) html += `<button class="btn btn-warning" onclick="handleAdminAction(${electionId}, 'pause')">暂停投票</button>`;
-                    if (status == 2) html += `<button class="btn btn-success" onclick="handleAdminAction(${electionId}, 'resume')">恢复投票</button>`;
+                    if (status == 1 && effStatus != 3) html += `<button class="btn btn-warning" onclick="handleAdminAction(${electionId}, 'pause')">暂停投票</button>`;
+                    if (status == 2 && effStatus != 3) html += `<button class="btn btn-success" onclick="handleAdminAction(${electionId}, 'resume')">恢复投票</button>`;
                     if (status == 1 || status == 2) html += `<button class="btn btn-danger" onclick="handleAdminAction(${electionId}, 'end')">结束投票</button>`;
                     html += `</div><hr>`;
                 }
 
                 html += `<div><strong>候选人 (${candidates.length}/${maxCandidates})</strong></div>`;
                 
-                if (status == 0 || status == 1) {
+                if (status == 0 || (status == 1 && effStatus != 3)) {
                     html += `<div style="margin:10px 0;">
                         <input type="text" id="applyName" placeholder="候选人姓名" style="width:45%;">
                         <input type="text" id="applyInfo" placeholder="候选人简介" style="width:45%;">
@@ -333,17 +438,20 @@
                 if (candidates.length === 0) {
                     html += '<p style="color:#999;">暂无候选人</p>';
                 } else {
-                    let totalApprovedVotes = 0;
+                    let totalApprovedVotes = 0n;
                     const approvedCandidates = candidates.filter(c => c[4] == 1);
                     for (const c of approvedCandidates) {
-                        totalApprovedVotes += c[5];
+                        totalApprovedVotes += BigInt(c[5]);
                     }
 
                     for (const c of candidates) {
                         const [cId, cName, cInfo, applicant, cStatus, cVotes] = c;
+                        const cVotesBig = BigInt(cVotes);
                         const cStatusText = getCandidateStatusText(cStatus);
                         const cBadgeClass = getCandidateStatusBadge(cStatus);
-                        const percent = totalApprovedVotes > 0 ? ((cVotes / totalApprovedVotes) * 100).toFixed(1) : 0;
+                        
+                        const formattedCVotes = voteMode == 0 ? cVotesBig.toString() : parseFloat(ethers.formatEther(cVotesBig)).toFixed(2);
+                        const percent = totalApprovedVotes > 0n ? ((Number(cVotesBig) / Number(totalApprovedVotes)) * 100).toFixed(1) : 0;
                         
                         html += `
                             <div class="candidate-item">
@@ -353,17 +461,25 @@
                                     <div style="font-size:12px;color:#999;">申请人: ${applicant.slice(0,6)}...${applicant.slice(-4)}</div>
                                 </div>
                                 <div class="vote-section">
-                                    <div class="vote-count">${cVotes}</div>
+                                    <div class="vote-count">${formattedCVotes}<span style="font-size:12px;font-weight:normal;">${voteUnit}</span></div>
                                     <div class="vote-percent">${percent}%</div>
                                     <div class="progress-bar" style="width:100px;"><div class="progress-fill" style="width:${percent}%"></div></div>
-                                    ${cStatus == 1 && status == 1 && !hasVoted ? 
-                                        `<button class="btn" style="margin-top:10px;" onclick="vote(${electionId}, ${cId})">投票</button>` : 
-                                        (hasVoted ? '<span style="color:green;font-size:12px;">✅ 已投票</span>' : '')}
+                                    <div style="margin-top:10px;">
+                                        ${hasVoted ? 
+                                            '<span style="color:green;font-size:12px;font-weight:bold;">✅ 已投票</span>' :
+                                            (cStatus == 1 ? (
+                                                status == 0 ? `<button class="btn btn-secondary" style="font-size:13px;" disabled>投票尚未开始</button>` :
+                                                status == 2 ? `<button class="btn btn-secondary" style="font-size:13px;" disabled>投票已暂停</button>` :
+                                                effStatus == 3 ? `<button class="btn btn-secondary" style="font-size:13px;" disabled>已过投票期</button>` :
+                                                status == 1 ? `<button class="btn" style="font-size:13px;" onclick="vote(${electionId}, ${cId})">投票</button>` : ''
+                                            ) : '')
+                                        }
+                                    </div>
                                 </div>
                             </div>
                         `;
 
-                        if (isReviewer && cStatus == 0) {
+                        if ((isReviewer || isAdmin || isOwner) && cStatus == 0) {
                             html += `<div style="text-align:right;margin-bottom:5px;">
                                 <button class="btn btn-success" style="font-size:12px;padding:4px 10px;" onclick="reviewCandidate(${electionId}, ${cId}, true)">通过</button>
                                 <button class="btn btn-danger" style="font-size:12px;padding:4px 10px;" onclick="reviewCandidate(${electionId}, ${cId}, false)">驳回</button>
@@ -372,11 +488,96 @@
                     }
                 }
 
+                html += `
+                <hr>
+                <div style="margin-top: 20px;">
+                    <div style="font-weight: bold; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>🔗 投票溯源 / 链上记录</span>
+                        <button class="btn btn-secondary" style="padding: 2px 8px; font-size: 11px;" onclick="loadVoteHistory(${electionId}, ${voteMode})">刷新</button>
+                    </div>
+                    <div id="voteLogs" style="font-size: 12px; max-height: 150px; overflow-y: auto; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 10px;">
+                        加载中...
+                    </div>
+                </div>
+                `;
+
                 document.getElementById('modalTitle').innerText = title;
                 document.getElementById('modalBody').innerHTML = html;
                 document.getElementById('electionModal').classList.add('active');
+
+                // Load voting history asynchronously
+                setTimeout(() => loadVoteHistory(electionId, voteMode), 100);
             } catch (e) {
                 console.error(e);
+            }
+        }
+
+        async function loadVoteHistory(electionId, voteMode) {
+            const logsDiv = document.getElementById('voteLogs');
+            if (!logsDiv || !contract) return;
+            
+            try {
+                const candidates = await contract.getCandidates(electionId);
+                const candidateMap = {};
+                candidates.forEach(c => {
+                    candidateMap[c[0].toString()] = c[1];
+                });
+
+                const provider = contract.runner.provider;
+                const filter = contract.filters.Voted();
+                const events = await contract.queryFilter(filter, 0, 'latest');
+                
+                const electionEvents = events.filter(e => e.args && e.args.electionId.toString() === electionId.toString());
+
+                if (electionEvents.length === 0) {
+                    logsDiv.innerHTML = '<p style="color:#999;text-align:center;margin:10px 0;">暂无投票记录</p>';
+                    return;
+                }
+
+                electionEvents.sort((a, b) => b.blockNumber - a.blockNumber);
+
+                let logsHtml = '<table style="width: 100%; border-collapse: collapse; text-align: left;">';
+                logsHtml += `
+                    <thead>
+                        <tr style="border-bottom: 2px solid #eee; font-weight: 600; color: #555;">
+                            <th style="padding: 6px 4px;">投票人</th>
+                            <th style="padding: 6px 4px;">投给</th>
+                            <th style="padding: 6px 4px;">权重/票数</th>
+                            <th style="padding: 6px 4px;">时间</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                `;
+
+                const blockPromises = electionEvents.map(e => provider.getBlock(e.blockNumber));
+                const blocks = await Promise.all(blockPromises);
+
+                for (let i = 0; i < electionEvents.length; i++) {
+                    const e = electionEvents[i];
+                    const block = blocks[i];
+                    const [evtElectionId, voter, candidateId, weight] = e.args;
+                    
+                    const candidateName = candidateMap[candidateId.toString()] || `候选人 #${candidateId}`;
+                    const formattedWeight = voteMode == 0 ? weight.toString() : parseFloat(ethers.formatEther(weight)).toFixed(2);
+                    const weightText = voteMode == 0 ? `${formattedWeight} 票` : `${formattedWeight} ${tokenSymbol}`;
+                    
+                    const timeText = block ? new Date(Number(block.timestamp) * 1000).toLocaleString('zh-CN') : '未知';
+                    const voterShort = voter.slice(0, 6) + '...' + voter.slice(-4);
+                    
+                    logsHtml += `
+                        <tr style="border-bottom: 1px solid #eee;">
+                            <td style="padding: 8px 4px; font-family: monospace;" title="${voter}">${voterShort}</td>
+                            <td style="padding: 8px 4px;">${candidateName}</td>
+                            <td style="padding: 8px 4px; font-weight: bold; color: #667eea;">${weightText}</td>
+                            <td style="padding: 8px 4px; color: #888; font-size: 11px;">${timeText}</td>
+                        </tr>
+                    `;
+                }
+                logsHtml += '</tbody></table>';
+                logsDiv.innerHTML = logsHtml;
+            } catch (err) {
+                console.error("加载投票历史失败:", err);
+                logsDiv.innerHTML = `<span style="color: red; font-size: 12px;">加载失败: ${err.message}</span>`;
             }
         }
 
@@ -437,6 +638,7 @@
                 const tx = await contract.vote(electionId, candidateId);
                 await tx.wait();
                 showMsg('✅ 投票成功！');
+                await updateTokenBalance();
                 showElectionDetail(electionId);
             } catch (e) {
                 showMsg('❌ 投票失败: ' + (e.reason || e.message), 'error');
@@ -534,10 +736,10 @@
             document.querySelector(`.tab:nth-child(${tab == 'elections' ? 1 : tab == 'create' ? 2 : 3})`).classList.add('active');
             document.getElementById(`${tab}Tab`).style.display = 'block';
             
-            if (tab === 'create' && !isAdmin) {
+            if (tab === 'create' && !(isAdmin || isOwner)) {
                 showMsg('⚠️ 您不是管理员，无法创建投票活动', 'info');
             }
-            if (tab === 'manage' && !isAdmin) {
+            if (tab === 'manage' && !(isAdmin || isOwner)) {
                 showMsg('⚠️ 您不是管理员，无法管理权限', 'info');
             }
         }
@@ -556,8 +758,52 @@
         };
 
         window.onload = async () => {
-            if (window.ethereum && window.ethereum.selectedAddress) {
-                connectWallet();
+            // 检测是否是通过 file:// 协议打开的
+            if (window.location.protocol === 'file:') {
+                const warningDiv = document.getElementById('protocolWarning');
+                if (warningDiv) warningDiv.style.display = 'block';
+            }
+            
+            // 检测 ethers 是否加载成功
+            if (typeof ethers === 'undefined') {
+                const warningDiv = document.getElementById('ethersWarning');
+                if (warningDiv) warningDiv.style.display = 'block';
+            }
+
+            if (typeof ethers !== 'undefined' && window.ethereum) {
+                // 用 eth_accounts 获取已经授权过的账号，实现刷新自动连接
+                window.ethereum.request({ method: 'eth_accounts' })
+                    .then((accounts) => {
+                        if (accounts && accounts.length > 0) {
+                            connectWallet();
+                        }
+                    })
+                    .catch((err) => {
+                        console.error("自动连接钱包失败:", err);
+                    });
+
+                window.ethereum.on('accountsChanged', (accounts) => {
+                    if (accounts.length > 0) {
+                        connectWallet();
+                    } else {
+                        signer = null;
+                        contract = null;
+                        tokenContract = null;
+                        userAddress = null;
+                        isAdmin = false;
+                        isReviewer = false;
+                        isOwner = false;
+                        document.getElementById('walletStatus').innerHTML = '🔒 未连接钱包';
+                        document.getElementById('accountDisplay').innerText = '';
+                        document.getElementById('tokenBalanceSection').style.display = 'none';
+                        document.getElementById('electionList').innerHTML = '<p style="text-align:center;color:#999;padding:20px;">请先连接钱包查看投票活动</p>';
+                        
+                        document.getElementById('addAdminBtn').disabled = true;
+                        document.getElementById('removeAdminBtn').disabled = true;
+                        document.getElementById('addReviewerBtn').disabled = true;
+                        document.getElementById('removeReviewerBtn').disabled = true;
+                    }
+                });
             }
         };
     </script>
